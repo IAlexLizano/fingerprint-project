@@ -129,9 +129,6 @@ dmypy.json
 .pyre/
 
 # Modelos entrenados
-models/saved/*.h5
-models/saved/*.pb
-models/saved/*.json
 
 # Datasets y embeddings
 data/dataset/*
