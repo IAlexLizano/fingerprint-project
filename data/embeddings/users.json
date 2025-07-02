@@ -1,0 +1,12 @@
+{
+  "Alex_Lizano": {
+    "username": "Alex_Lizano",
+    "image_paths": [
+      "data/dataset\\Alex_Lizano_1.jpg",
+      "data/dataset\\Alex_Lizano_2.jpg",
+      "data/dataset\\Alex_Lizano_3.jpg"
+    ],
+    "embedding_count": 3,
+    "registered_date": "2025-07-02T21:39:17"
+  }
+}
