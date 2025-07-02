@@ -131,7 +131,6 @@ dmypy.json
 # Modelos entrenados
 # Datasets y embeddings
 data/dataset/*
-data/embeddings/*
 data/DB1_A/*
 
 # Logs
