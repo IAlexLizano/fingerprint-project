@@ -18,6 +18,19 @@ lib/
 lib64/
 parts/
 sdist/
+
+# Modelos entrenados
+*.pkl
+*.joblib
+
+# Logs y plots de entrenamiento
+logs/
+training_plots/
+*.csv
+
+# Datos temporales
+temp/
+cache/
 var/
 wheels/
 pip-wheel-metadata/
@@ -133,6 +146,8 @@ dmypy.json
 # Datasets y embeddings
 data/dataset/*
 data/DB1_A
+data/Altered-Easy/*
+
 
 # Logs
 *.log
