@@ -368,7 +368,7 @@ class FingerprintService:
                 }
             
             # Obtener información del usuario
-            user_data = self.dataset_manager.get_user_data(username)
+            user_data = self.dataset_manager.get_user_info(username)
             
             if user_data is None:
                 return {
@@ -380,16 +380,32 @@ class FingerprintService:
             user_embeddings = self.dataset_manager.get_user_embeddings(username)
             embedding_count = len(user_embeddings) if user_embeddings is not None else 0
             
+            # Preparar embeddings para la respuesta
+            embeddings_list = None
+            if user_embeddings is not None and len(user_embeddings) > 0:
+                embeddings_list = user_embeddings.tolist()
+            
             # Calcular estadísticas de embeddings
             embedding_stats = {}
             if user_embeddings is not None and len(user_embeddings) > 0:
-                embedding_stats = {
-                    "mean": float(np.mean(user_embeddings)),
-                    "std": float(np.std(user_embeddings)),
-                    "min": float(np.min(user_embeddings)),
-                    "max": float(np.max(user_embeddings)),
-                    "dimension": int(user_embeddings.shape[1]) if len(user_embeddings.shape) > 1 else len(user_embeddings[0])
-                }
+                try:
+                    # Asegurarse de que sea un array 2D
+                    if len(user_embeddings.shape) == 1:
+                        user_embeddings = user_embeddings.reshape(1, -1)
+                    
+                    embedding_stats = {
+                        "mean": float(np.mean(user_embeddings)),
+                        "std": float(np.std(user_embeddings)),
+                        "min": float(np.min(user_embeddings)),
+                        "max": float(np.max(user_embeddings)),
+                        "dimension": int(user_embeddings.shape[1]) if len(user_embeddings.shape) > 1 else len(user_embeddings)
+                    }
+                except Exception as stats_error:
+                    print(f"Error calculando estadísticas de embeddings: {stats_error}")
+                    embedding_stats = {
+                        "error": "No se pudieron calcular las estadísticas",
+                        "dimension": user_embeddings.shape[-1] if user_embeddings is not None else 0
+                    }
             
             return {
                 "success": True,
@@ -397,6 +413,7 @@ class FingerprintService:
                 "embedding_count": embedding_count,
                 "registered_date": user_data.get("registered_date", "Unknown"),
                 "image_paths": user_data.get("image_paths", []),
+                "embeddings": embeddings_list,
                 "embedding_stats": embedding_stats
             }
             
@@ -481,6 +498,7 @@ class FingerprintService:
                         "embedding_count": user_details["embedding_count"],
                         "registered_date": user_details["registered_date"],
                         "image_paths": user_details["image_paths"],
+                        "embeddings": user_details.get("embeddings", None),
                         "embedding_stats": user_details.get("embedding_stats", {})
                     }
                     users_detail.append(user_detail)
@@ -519,3 +537,147 @@ class FingerprintService:
                 "error": str(e),
                 "timestamp": datetime.now().isoformat()
             }
+    
+    def train_model(self, dataset_path: str, epochs: int = 50, batch_size: int = 32, validation_split: float = 0.2) -> Dict:
+        """
+        Entrena el modelo siamesa
+        
+        Args:
+            dataset_path: Ruta al archivo JSON del dataset
+            epochs: Número de épocas de entrenamiento
+            batch_size: Tamaño del batch
+            validation_split: Proporción de datos para validación
+            
+        Returns:
+            Diccionario con el resultado del entrenamiento
+        """
+        try:
+            # Validaciones
+            if not os.path.exists(dataset_path):
+                return {
+                    "success": False,
+                    "message": f"Dataset no encontrado en {dataset_path}",
+                    "training_time": None,
+                    "final_accuracy": None,
+                    "model_saved": False
+                }
+            
+            if epochs < 1 or epochs > 200:
+                return {
+                    "success": False,
+                    "message": "El número de épocas debe estar entre 1 y 200",
+                    "training_time": None,
+                    "final_accuracy": None,
+                    "model_saved": False
+                }
+            
+            if batch_size < 8 or batch_size > 128:
+                return {
+                    "success": False,
+                    "message": "El tamaño del batch debe estar entre 8 y 128",
+                    "training_time": None,
+                    "final_accuracy": None,
+                    "model_saved": False
+                }
+            
+            if validation_split < 0.1 or validation_split > 0.5:
+                return {
+                    "success": False,
+                    "message": "La proporción de validación debe estar entre 0.1 y 0.5",
+                    "training_time": None,
+                    "final_accuracy": None,
+                    "model_saved": False
+                }
+            
+            # Por ahora retornamos un mensaje indicando que se debe usar el script de entrenamiento
+            return {
+                "success": False,
+                "message": "Para entrenar el modelo, ejecuta 'python train_model.py' desde la terminal. El entrenamiento vía API no está implementado por seguridad y estabilidad.",
+                "training_time": None,
+                "final_accuracy": None,
+                "model_saved": False
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error interno del servidor: {str(e)}",
+                "training_time": None,
+                "final_accuracy": None,
+                "model_saved": False
+            }
+    
+    def get_dataset_info(self) -> Dict:
+        """
+        Obtiene información del dataset
+        
+        Returns:
+            Diccionario con información del dataset
+        """
+        try:
+            dataset_path = "data/socofing_dataset.json"
+            
+            if not os.path.exists(dataset_path):
+                return {
+                    "success": False,
+                    "message": "Dataset no encontrado",
+                    "dataset_path": dataset_path,
+                    "total_subjects": 0,
+                    "total_images": 0,
+                    "dataset_size_mb": 0.0
+                }
+            
+            # Leer información del dataset
+            with open(dataset_path, 'r') as f:
+                import json
+                dataset = json.load(f)
+            
+            total_subjects = len(dataset.get('subjects', {}))
+            total_images = 0
+            
+            for subject_data in dataset.get('subjects', {}).values():
+                total_images += len(subject_data.get('images', []))
+            
+            # Calcular tamaño del archivo
+            dataset_size_mb = os.path.getsize(dataset_path) / (1024 * 1024)
+            
+            return {
+                "success": True,
+                "message": "Información del dataset obtenida exitosamente",
+                "dataset_path": dataset_path,
+                "total_subjects": total_subjects,
+                "total_images": total_images,
+                "dataset_size_mb": round(dataset_size_mb, 2)
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error interno del servidor: {str(e)}",
+                "dataset_path": None,
+                "total_subjects": 0,
+                "total_images": 0,
+                "dataset_size_mb": 0.0
+            }
+    
+    def load_model(self) -> bool:
+        """
+        Carga el modelo entrenado
+        
+        Returns:
+            True si el modelo se cargó exitosamente, False en caso contrario
+        """
+        try:
+            if os.path.exists(self.model_path):
+                self.siamese_network = ImprovedSiameseNetwork.load_model(self.model_path)
+                self.model_loaded = True
+                print(f"✅ Modelo recargado exitosamente desde: {self.model_path}")
+                return True
+            else:
+                print(f"⚠️ Modelo no encontrado en {self.model_path}")
+                self.model_loaded = False
+                return False
+        except Exception as e:
+            print(f"❌ Error al cargar el modelo: {e}")
+            self.model_loaded = False
+            return False
