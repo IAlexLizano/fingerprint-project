@@ -1,41 +1,99 @@
+"""
+Servicio de Autenticación de Huellas Dactilares
+Integrado con el modelo siamesa mejorado
+"""
 import os
 import numpy as np
 from typing import List, Optional, Tuple, Dict
 from datetime import datetime
+import cv2
+import base64
+import tensorflow as tf
 
-from models.fingerprint_siamese import FingerprintSiameseNetwork
+from models.fingerprint_siamese_model import ImprovedSiameseNetwork
+from data.fingerprint_data_processor import FingerprintDataProcessor
 from data.dataset_manager import DatasetManager
 
 class FingerprintService:
-    def __init__(self, model_path: str = "models/saved/fingerprint_siamese_model.h5"):
+    def __init__(self, model_path: str = "best_fingerprint_model.h5"):
         """
         Inicializa el servicio de autenticación de huellas dactilares
         
         Args:
-            model_path: Ruta al modelo entrenado
+            model_path: Ruta al mejor modelo entrenado
         """
         self.model_path = model_path
-        self.siamese_network = FingerprintSiameseNetwork()
+        self.siamese_network = ImprovedSiameseNetwork()
+        self.data_processor = FingerprintDataProcessor()
         self.dataset_manager = DatasetManager()
         
         # Cargar modelo si existe
         self.model_loaded = False
         if os.path.exists(model_path):
             try:
-                self.siamese_network.load_model(model_path)
+                # Cargar el modelo usando el método de la clase
+                self.siamese_network = ImprovedSiameseNetwork.load_model(model_path)
                 self.model_loaded = True
-                print("Modelo cargado exitosamente")
+                print(f"✅ Modelo cargado exitosamente desde: {model_path}")
             except Exception as e:
-                print(f"Error al cargar el modelo: {e}")
-                # Intenta cargar el modelo anterior si existe
-                old_model_path = "models/saved/siamese_model.h5"
-                if os.path.exists(old_model_path):
-                    try:
-                        self.siamese_network.load_model(old_model_path)
-                        self.model_loaded = True
-                        print("Modelo anterior cargado exitosamente")
-                    except Exception as e2:
-                        print(f"Error al cargar el modelo anterior: {e2}")
+                print(f"❌ Error al cargar el modelo: {e}")
+                self.model_loaded = False
+        else:
+            print(f"⚠️ Modelo no encontrado en {model_path}")
+            print("💡 Ejecuta 'python train_model.py' para entrenar el modelo")
+            self.model_loaded = False
+    
+    def _generate_embedding_from_base64(self, image_base64: str) -> np.ndarray:
+        """
+        Genera embedding de una imagen en base64
+        
+        Args:
+            image_base64: Imagen codificada en base64
+            
+        Returns:
+            Array numpy con el embedding
+        """
+        if not self.model_loaded:
+            raise Exception("Modelo no cargado. No se puede generar embedding.")
+        
+        try:
+            # Decodificar imagen base64
+            image_data = base64.b64decode(image_base64)
+            nparr = np.frombuffer(image_data, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+            
+            if image is None:
+                raise Exception("No se pudo decodificar la imagen")
+            
+            # Preprocesar imagen usando el procesador de datos
+            # Redimensionar primero
+            image = cv2.resize(image, self.data_processor.target_size, interpolation=cv2.INTER_AREA)
+            
+            # Aplicar CLAHE
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            image = clahe.apply(image)
+            
+            # Filtro gaussiano
+            image = cv2.GaussianBlur(image, (3, 3), 0)
+            
+            # Realzar bordes
+            kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]])
+            img_enhanced = cv2.filter2D(image, -1, kernel)
+            image = cv2.addWeighted(image, 0.7, img_enhanced, 0.3, 0)
+            image = np.clip(image, 0, 255)
+            
+            # Normalizar
+            image = image.astype(np.float32) / 255.0
+            
+            # Añadir dimensiones de batch y canal
+            processed_image = np.expand_dims(image, axis=[0, -1])
+            
+            # Generar embedding
+            embedding = self.siamese_network.get_embeddings(processed_image)
+            return embedding.flatten()
+            
+        except Exception as e:
+            raise Exception(f"Error al generar embedding: {str(e)}")
     
     def register_user(self, username: str, images_base64: List[str]) -> Dict:
         """
@@ -43,21 +101,30 @@ class FingerprintService:
         
         Args:
             username: Nombre del usuario
-            images_base64: Lista de imágenes en formato base64
+            images_base64: Lista de imágenes codificadas en base64
             
         Returns:
             Diccionario con el resultado del registro
         """
         try:
+            # Validaciones
             if not self.model_loaded:
                 return {
                     "success": False,
-                    "message": "Modelo no cargado. Primero debe entrenar el modelo.",
+                    "message": "Modelo no cargado. No se puede registrar usuario.",
                     "username": None,
                     "embedding_count": None
                 }
             
-            if len(images_base64) < 1:
+            if not username or not username.strip():
+                return {
+                    "success": False,
+                    "message": "El nombre de usuario no puede estar vacío.",
+                    "username": None,
+                    "embedding_count": None
+                }
+            
+            if not images_base64 or len(images_base64) == 0:
                 return {
                     "success": False,
                     "message": "Se requiere al menos una imagen para el registro.",
@@ -65,20 +132,20 @@ class FingerprintService:
                     "embedding_count": None
                 }
             
-            # Verificar que el usuario no exista
+            # Verificar si el usuario ya existe
             if username in self.dataset_manager.get_all_users():
                 return {
                     "success": False,
-                    "message": f"El usuario '{username}' ya existe.",
+                    "message": f"El usuario '{username}' ya existe en el sistema.",
                     "username": None,
                     "embedding_count": None
                 }
             
-            # Generar embeddings para cada imagen
+            # Generar embeddings
             embeddings = []
             for i, image_base64 in enumerate(images_base64):
                 try:
-                    embedding = self.siamese_network.generate_embedding_from_base64(image_base64)
+                    embedding = self._generate_embedding_from_base64(image_base64)
                     embeddings.append(embedding)
                 except Exception as e:
                     return {
@@ -114,25 +181,35 @@ class FingerprintService:
                 "embedding_count": None
             }
     
-    def authenticate_user(self, image_base64: str, threshold: float = 0.5) -> Dict:
+    def authenticate_user(self, image_base64: str, threshold: float = 0.75) -> Dict:
         """
-        Autentica un usuario basado en su huella dactilar
+        Autentica un usuario usando una huella dactilar
         
         Args:
-            image_base64: Imagen en formato base64
-            threshold: Umbral de similitud mínimo
+            image_base64: Imagen de huella en base64
+            threshold: Umbral de similitud para autenticación
             
         Returns:
             Diccionario con el resultado de la autenticación
         """
         try:
+            # Validaciones
             if not self.model_loaded:
                 return {
                     "success": False,
                     "authenticated": False,
                     "username": None,
                     "similarity_score": None,
-                    "message": "Modelo no cargado. Primero debe entrenar el modelo."
+                    "message": "Modelo no cargado. No se puede autenticar."
+                }
+            
+            if not image_base64:
+                return {
+                    "success": False,
+                    "authenticated": False,
+                    "username": None,
+                    "similarity_score": None,
+                    "message": "Se requiere una imagen para la autenticación."
                 }
             
             # Verificar que hay usuarios registrados
@@ -147,7 +224,7 @@ class FingerprintService:
             
             # Generar embedding de la imagen de consulta
             try:
-                query_embedding = self.siamese_network.generate_embedding_from_base64(image_base64)
+                query_embedding = self._generate_embedding_from_base64(image_base64)
             except Exception as e:
                 return {
                     "success": False,
@@ -175,8 +252,8 @@ class FingerprintService:
                     "success": True,
                     "authenticated": False,
                     "username": None,
-                    "similarity_score": float(similarity_score),
-                    "message": "No se encontró una coincidencia válida."
+                    "similarity_score": float(similarity_score) if similarity_score is not None else 0.0,
+                    "message": "Usuario no reconocido."
                 }
                 
         except Exception as e:
@@ -188,139 +265,23 @@ class FingerprintService:
                 "message": f"Error interno del servidor: {str(e)}"
             }
     
-    def train_model(self, dataset_path: str, epochs: int = 20, 
-                   batch_size: int = 32, validation_split: float = 0.2) -> Dict:
-        """
-        Entrena el modelo siamesa usando el nuevo enfoque optimizado
-        
-        Args:
-            dataset_path: Ruta al archivo JSON del dataset
-            epochs: Número de épocas de entrenamiento (reducido para pruebas más rápidas)
-            batch_size: Tamaño del batch
-            validation_split: Proporción de datos para validación
-            
-        Returns:
-            Diccionario con el resultado del entrenamiento
-        """
-        try:
-            # Verificar que el archivo de dataset existe
-            if not os.path.exists(dataset_path):
-                return {
-                    "success": False,
-                    "message": f"Archivo de dataset no encontrado: {dataset_path}",
-                    "training_history": None,
-                    "final_accuracy": None,
-                    "final_loss": None
-                }
-            
-            print(f"🚀 Iniciando entrenamiento desde el servicio...")
-            print(f"   - Dataset: {dataset_path}")
-            print(f"   - Épocas: {epochs}, Batch size: {batch_size}")
-            
-            # Importar las funciones de entrenamiento del script principal
-            import sys
-            import json
-            from multiprocessing import cpu_count
-            sys.path.append('.')
-            from train_fvc_model import load_dataset_parallel, create_training_pairs
-            
-            # Cargar datos usando el enfoque optimizado
-            num_workers = max(1, cpu_count() // 2)
-            images, labels = load_dataset_parallel(dataset_path, num_workers)
-            
-            # Crear pares de entrenamiento
-            pairs_a, pairs_b, pair_labels = create_training_pairs(images, labels)
-            
-            # Dividir en entrenamiento y validación
-            split_idx = int(len(pairs_a) * (1 - validation_split))
-            train_a, val_a = pairs_a[:split_idx], pairs_a[split_idx:]
-            train_b, val_b = pairs_b[:split_idx], pairs_b[split_idx:]
-            train_labels, val_labels = pair_labels[:split_idx], pair_labels[split_idx:]
-            
-            # Reinicializar la red siamesa para el entrenamiento
-            self.siamese_network = FingerprintSiameseNetwork()
-            
-            # Entrenar el modelo
-            history = self.siamese_network.train(
-                train_data=(train_a, train_b, train_labels),
-                validation_data=(val_a, val_b, val_labels),
-                epochs=epochs,
-                batch_size=batch_size
-            )
-            
-            # Guardar el modelo entrenado
-            os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
-            self.siamese_network.save_model(self.model_path)
-            self.model_loaded = True
-            
-            # Obtener métricas finales
-            final_accuracy = history.get('accuracy', [0])[-1] if 'accuracy' in history else None
-            final_loss = history.get('loss', [0])[-1] if 'loss' in history else None
-            
-            return {
-                "success": True,
-                "message": "Modelo entrenado exitosamente con enfoque optimizado",
-                "training_history": history,
-                "final_accuracy": final_accuracy,
-                "final_loss": final_loss
-            }
-            
-        except Exception as e:
-            import traceback
-            error_detail = traceback.format_exc()
-            print(f"❌ Error durante el entrenamiento: {error_detail}")
-            
-            return {
-                "success": False,
-                "message": f"Error durante el entrenamiento: {str(e)}",
-                "training_history": None,
-                "final_accuracy": None,
-                "final_loss": None
-            }
-    
-    def get_dataset_info(self) -> Dict:
-        """
-        Obtiene información del dataset
-        
-        Returns:
-            Diccionario con información del dataset
-        """
-        try:
-            return self.dataset_manager.get_dataset_info()
-        except Exception as e:
-            return {
-                "error": str(e),
-                "total_users": 0,
-                "total_embeddings": 0,
-                "users": [],
-                "dataset_path": "",
-                "embeddings_path": ""
-            }
+    def get_user_count(self) -> int:
+        """Obtiene el número de usuarios registrados"""
+        return self.dataset_manager.get_user_count()
     
     def get_all_users(self) -> List[str]:
-        """
-        Obtiene la lista de todos los usuarios registrados
-        
-        Returns:
-            Lista de nombres de usuario
-        """
-        try:
-            return self.dataset_manager.get_all_users()
-        except Exception as e:
-            print(f"Error al obtener usuarios: {e}")
-            return []
+        """Obtiene la lista de todos los usuarios registrados"""
+        return self.dataset_manager.get_all_users()
     
     def delete_user(self, username: str) -> Dict:
-        """
-        Elimina un usuario del sistema
-        
-        Args:
-            username: Nombre del usuario a eliminar
-            
-        Returns:
-            Diccionario con el resultado de la eliminación
-        """
+        """Elimina un usuario del sistema"""
         try:
+            if username not in self.dataset_manager.get_all_users():
+                return {
+                    "success": False,
+                    "message": f"Usuario '{username}' no encontrado."
+                }
+            
             success = self.dataset_manager.delete_user(username)
             
             if success:
@@ -331,7 +292,7 @@ class FingerprintService:
             else:
                 return {
                     "success": False,
-                    "message": f"Error al eliminar el usuario '{username}' o el usuario no existe."
+                    "message": f"Error al eliminar el usuario '{username}'."
                 }
                 
         except Exception as e:
@@ -388,59 +349,15 @@ class FingerprintService:
                 "deleted_users": []
             }
     
-    def get_health_status(self) -> Dict:
-        """
-        Obtiene el estado de salud del sistema
-        
-        Returns:
-            Diccionario con el estado del sistema
-        """
-        try:
-            dataset_info = self.get_dataset_info()
-            
-            return {
-                "status": "healthy",
-                "timestamp": datetime.now(),
-                "model_loaded": self.model_loaded,
-                "dataset_info": dataset_info
-            }
-        except Exception as e:
-            return {
-                "status": "unhealthy",
-                "timestamp": datetime.now(),
-                "model_loaded": self.model_loaded,
-                "error": str(e)
-            }
-    
-    def load_model(self) -> bool:
-        """
-        Carga el modelo entrenado
-        
-        Returns:
-            True si el modelo se cargó exitosamente, False en caso contrario
-        """
-        try:
-            if os.path.exists(self.model_path):
-                self.siamese_network.load_model(self.model_path)
-                self.model_loaded = True
-                return True
-            else:
-                self.model_loaded = False
-                return False
-        except Exception as e:
-            print(f"Error al cargar el modelo: {e}")
-            self.model_loaded = False
-            return False
-        
     def get_user_details(self, username: str) -> Dict:
         """
-        Obtiene información detallada de un usuario específico incluyendo embeddings
+        Obtiene detalles específicos de un usuario
         
         Args:
             username: Nombre del usuario
             
         Returns:
-            Diccionario con información detallada del usuario
+            Diccionario con los detalles del usuario
         """
         try:
             # Verificar si el usuario existe
@@ -450,37 +367,37 @@ class FingerprintService:
                     "message": f"Usuario '{username}' no encontrado"
                 }
             
-            # Obtener información básica del usuario
-            user_info = self.dataset_manager.get_user_info(username)
-            if not user_info:
+            # Obtener información del usuario
+            user_data = self.dataset_manager.get_user_data(username)
+            
+            if user_data is None:
                 return {
                     "success": False,
-                    "message": f"No se pudo obtener información del usuario '{username}'"
+                    "message": f"No se encontraron datos para el usuario '{username}'"
                 }
             
-            # Obtener embeddings del usuario
+            # Obtener embeddings
             user_embeddings = self.dataset_manager.get_user_embeddings(username)
-            embeddings_list = user_embeddings.tolist() if user_embeddings is not None else []
+            embedding_count = len(user_embeddings) if user_embeddings is not None else 0
             
             # Calcular estadísticas de embeddings
-            stats = {}
+            embedding_stats = {}
             if user_embeddings is not None and len(user_embeddings) > 0:
-                stats = {
+                embedding_stats = {
                     "mean": float(np.mean(user_embeddings)),
                     "std": float(np.std(user_embeddings)),
                     "min": float(np.min(user_embeddings)),
                     "max": float(np.max(user_embeddings)),
-                    "embedding_dimension": int(user_embeddings.shape[1]) if len(user_embeddings.shape) > 1 else int(len(user_embeddings[0]))
+                    "dimension": int(user_embeddings.shape[1]) if len(user_embeddings.shape) > 1 else len(user_embeddings[0])
                 }
             
             return {
                 "success": True,
                 "username": username,
-                "embedding_count": user_info.get("embedding_count", 0),
-                "registered_date": user_info.get("registered_date", ""),
-                "image_paths": user_info.get("image_paths", []),
-                "embeddings": embeddings_list,
-                "embedding_stats": stats
+                "embedding_count": embedding_count,
+                "registered_date": user_data.get("registered_date", "Unknown"),
+                "image_paths": user_data.get("image_paths", []),
+                "embedding_stats": embedding_stats
             }
             
         except Exception as e:
@@ -491,7 +408,7 @@ class FingerprintService:
     
     def get_user_embeddings(self, username: str) -> Dict:
         """
-        Obtiene solo los embeddings de un usuario específico
+        Obtiene los embeddings de un usuario específico
         
         Args:
             username: Nombre del usuario
@@ -564,7 +481,6 @@ class FingerprintService:
                         "embedding_count": user_details["embedding_count"],
                         "registered_date": user_details["registered_date"],
                         "image_paths": user_details["image_paths"],
-                        "embeddings": user_details.get("embeddings", []),
                         "embedding_stats": user_details.get("embedding_stats", {})
                     }
                     users_detail.append(user_detail)
@@ -582,4 +498,24 @@ class FingerprintService:
                 "total_count": 0,
                 "total_embeddings": 0,
                 "error": str(e)
+            }
+    
+    def get_health_status(self) -> Dict:
+        """Obtiene el estado de salud del sistema"""
+        try:
+            return {
+                "status": "healthy" if self.model_loaded else "unhealthy",
+                "model_loaded": self.model_loaded,
+                "model_path": self.model_path,
+                "user_count": self.get_user_count(),
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "model_loaded": False,
+                "model_path": self.model_path,
+                "user_count": 0,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
             }
